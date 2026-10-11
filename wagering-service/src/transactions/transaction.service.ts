@@ -3,6 +3,7 @@ import {
     BadRequestException,
     ConflictException,
     Injectable,
+    Logger,
     NotFoundException,
 } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
@@ -17,6 +18,8 @@ import { CreateTransactionDto } from './create-transaction.dto.js';
 import { Wallet } from '../wallets/wallet.entity.js';
 import { LedgerService } from '../ledger/ledger.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
+import { MetricsService } from '../observability/metrics.service.js';
+import { InvalidMoneyError, Money } from '../domain/money.js';
 
 function toCents(value: string): bigint {
     if (!/^(?:0|[1-9]\d{0,15})\.\d{2}$/.test(value)) {
@@ -37,15 +40,18 @@ function centsToMoney(value: bigint): string {
 
 @Injectable()
 export class TransactionsService {
+    private readonly logger = new Logger(TransactionsService.name);
     constructor(
         private readonly em: EntityManager,
         private readonly ledgerService: LedgerService,
         private readonly outboxService: OutboxService,
+        private readonly metrics: MetricsService,
     ) { }
 
     async processTransaction(
         input: CreateTransactionDto,
         idempotencyKey: string,
+        manager: EntityManager = this.em,
     ): Promise<Transaction> {
         if (
             !['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'].includes(input.type)
@@ -62,31 +68,37 @@ export class TransactionsService {
             );
         }
 
-        const amountCents = toCents(input.amount);
+        let inputMoney: Money;
+        try { inputMoney = Money.from({ amount: input.amount, currency: input.currency }); }
+        catch (error) {
+            if (error instanceof InvalidMoneyError) throw new BadRequestException(error.message);
+            throw error;
+        }
+        const amountCents = inputMoney.toMinorUnits();
 
         if (amountCents <= 0n) {
             throw new BadRequestException('O valor deve ser maior que zero');
         }
 
+        const canonicalPayload = {
+            currency: input.currency,
+            externalReferenceTransactionId: input.externalReferenceTransactionId ?? null,
+            externalTransactionId: input.externalTransactionId,
+            gameId: input.gameId,
+            playerId: input.playerId,
+            providerId: input.providerId,
+            roundId: input.roundId,
+            type: input.type,
+            amount: input.amount,
+            walletId: input.walletId,
+        };
         const payloadHash = createHash('sha256')
-            .update(
-                JSON.stringify([
-                    input.providerId,
-                    input.externalTransactionId,
-                    input.walletId,
-                    input.playerId,
-                    input.roundId,
-                    input.gameId,
-                    input.type,
-                    input.amount,
-                    input.currency,
-                    input.externalReferenceTransactionId ?? null,
-                ]),
-            )
+            .update(JSON.stringify(Object.fromEntries(Object.entries(canonicalPayload).sort(([a], [b]) => a.localeCompare(b)))))
             .digest('hex');
 
+        const startedAt = performance.now();
         try {
-            return await this.em.transactional(
+            const result = await manager.transactional(
                 async (tx): Promise<Transaction> => {
                     // Repetir a mesma chave com o mesmo conteúdo devolve a transação.
                     const existing = await tx.findOne(Transaction, {
@@ -100,10 +112,13 @@ export class TransactionsService {
                             );
                         }
 
-                        return existing;
+                        if (existing.status !== 'PENDING_REFERENCE') {
+                            existing.idempotentReplay = true;
+                            return existing;
+                        }
                     }
 
-                    const transaction = tx.create(Transaction, {
+                    const transaction = existing ?? tx.create(Transaction, {
                         providerId: input.providerId,
                         externalTransactionId: input.externalTransactionId,
                         idempotencyKey,
@@ -118,10 +133,12 @@ export class TransactionsService {
                         referenceExternalTransactionId:
                             input.externalReferenceTransactionId,
                         status: 'PENDING',
+                        retryAttempts: 0,
+                        idempotentReplay: false,
                         createdAt: new Date(),
                     });
 
-                    await tx.persist(transaction).flush();
+                    if (!existing) await tx.persist(transaction).flush();
 
                     // Serializa movimentações concorrentes da mesma carteira.
                     const wallet = await tx.findOne(
@@ -142,11 +159,19 @@ export class TransactionsService {
                         transaction.failureCode = 'WALLET_MISMATCH';
                         transaction.processedAt = new Date();
 
+                        await this.outboxService.enqueueTransaction({
+                            transactionId: transaction.id, walletId: input.walletId,
+                            playerId: input.playerId, type: input.type,
+                            amount: input.amount, currency: input.currency,
+                            status: 'REJECTED', failureCode: transaction.failureCode,
+                        }, tx);
+
                         await tx.flush();
                         return transaction;
                     }
 
                     const balanceCents = toCents(wallet.balance);
+                    transaction.responseBalance = wallet.balance;
 
 
                     if (input.type === 'LOSS') {
@@ -188,6 +213,24 @@ export class TransactionsService {
 
                         if (!original) {
                             transaction.status = 'PENDING_REFERENCE';
+                            transaction.retryAttempts += 1;
+                            transaction.nextReferenceAttemptAt = new Date(Date.now() + Math.min(300, 2 ** transaction.retryAttempts) * 1000);
+                            if (transaction.retryAttempts >= 10) {
+                                transaction.status = 'REJECTED';
+                                transaction.failureCode = 'REFERENCE_NOT_FOUND';
+                                transaction.processedAt = new Date();
+                                await this.outboxService.enqueueTransaction({
+                                    transactionId: transaction.id, walletId: input.walletId,
+                                    playerId: input.playerId, type: input.type, amount: input.amount,
+                                    currency: input.currency, status: 'REJECTED', failureCode: transaction.failureCode,
+                                }, tx);
+                            } else {
+                                await this.outboxService.enqueueTransaction({
+                                    transactionId: transaction.id, walletId: input.walletId,
+                                    playerId: input.playerId, type: input.type, amount: input.amount,
+                                    currency: input.currency, status: 'PENDING_REFERENCE',
+                                }, tx);
+                            }
                             await tx.flush();
                             return transaction;
                         }
@@ -206,6 +249,7 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'INVALID_REFERENCE';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
@@ -215,12 +259,14 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'AMOUNT_MISMATCH';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
                         }
 
                         const existingRollback = await tx.findOne(Transaction, {
+                            id: { $ne: transaction.id },
                             providerId: input.providerId,
                             referenceExternalTransactionId:
                                 original.externalTransactionId,
@@ -232,6 +278,7 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'REFERENCE_ALREADY_REVERSED';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
@@ -255,6 +302,24 @@ export class TransactionsService {
 
                         if (!original) {
                             transaction.status = 'PENDING_REFERENCE';
+                            transaction.retryAttempts += 1;
+                            transaction.nextReferenceAttemptAt = new Date(Date.now() + Math.min(300, 2 ** transaction.retryAttempts) * 1000);
+                            if (transaction.retryAttempts >= 10) {
+                                transaction.status = 'REJECTED';
+                                transaction.failureCode = 'REFERENCE_NOT_FOUND';
+                                transaction.processedAt = new Date();
+                                await this.outboxService.enqueueTransaction({
+                                    transactionId: transaction.id, walletId: input.walletId,
+                                    playerId: input.playerId, type: input.type, amount: input.amount,
+                                    currency: input.currency, status: 'REJECTED', failureCode: transaction.failureCode,
+                                }, tx);
+                            } else {
+                                await this.outboxService.enqueueTransaction({
+                                    transactionId: transaction.id, walletId: input.walletId,
+                                    playerId: input.playerId, type: input.type, amount: input.amount,
+                                    currency: input.currency, status: 'PENDING_REFERENCE',
+                                }, tx);
+                            }
 
                             await tx.flush();
                             return transaction;
@@ -274,6 +339,7 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'INVALID_REFERENCE';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
@@ -283,12 +349,14 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'AMOUNT_MISMATCH';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
                         }
 
                         const existingRefund = await tx.findOne(Transaction, {
+                            id: { $ne: transaction.id },
                             providerId: input.providerId,
                             referenceExternalTransactionId:
                                 original.externalTransactionId,
@@ -300,6 +368,7 @@ export class TransactionsService {
                             transaction.status = 'REJECTED';
                             transaction.failureCode = 'REFERENCE_ALREADY_REFUNDED';
                             transaction.processedAt = new Date();
+                            await this.enqueueRejected(transaction, input, tx);
 
                             await tx.flush();
                             return transaction;
@@ -320,8 +389,16 @@ export class TransactionsService {
                     // BET e reversões de WIN/REFUND precisam de saldo suficiente.
                     if (shouldDebit && balanceCents < amountCents) {
                         transaction.status = 'REJECTED';
-                        transaction.failureCode = 'INSUFFICIENT_FUNDS';
+                        transaction.failureCode = input.type === 'ROLLBACK'
+                            ? 'ROLLBACK_WOULD_OVERDRAW' : 'INSUFFICIENT_FUNDS';
                         transaction.processedAt = new Date();
+
+                        await this.outboxService.enqueueTransaction({
+                            transactionId: transaction.id, walletId: input.walletId,
+                            playerId: input.playerId, type: input.type,
+                            amount: input.amount, currency: input.currency,
+                            status: 'REJECTED', failureCode: transaction.failureCode,
+                        }, tx);
 
                         await tx.flush();
                         return transaction;
@@ -338,17 +415,24 @@ export class TransactionsService {
                         transaction.status = 'REJECTED';
                         transaction.failureCode = 'BALANCE_LIMIT_EXCEEDED';
                         transaction.processedAt = new Date();
+                        await this.outboxService.enqueueTransaction({
+                            transactionId: transaction.id, walletId: input.walletId,
+                            playerId: input.playerId, type: input.type, amount: input.amount,
+                            currency: input.currency, status: 'REJECTED', failureCode: transaction.failureCode,
+                        }, tx);
 
                         await tx.flush();
                         return transaction;
                     }
 
                     wallet.balance = centsToMoney(newBalanceCents);
+                    transaction.responseBalance = wallet.balance;
                     wallet.version += 1;
                     wallet.updatedAt = new Date();
 
                     transaction.status = 'PROCESSED';
                     transaction.processedAt = new Date();
+                    transaction.nextReferenceAttemptAt = undefined;
 
 
                     await this.ledgerService.createEntry(
@@ -361,6 +445,17 @@ export class TransactionsService {
                         },
                         tx,
                     );
+
+                    await this.outboxService.enqueueBalanceChanged({
+                        transactionId: transaction.id,
+                        walletId: wallet.id,
+                        direction: shouldDebit ? 'DEBIT' : 'CREDIT',
+                        amount: input.amount,
+                        currency: input.currency,
+                        balanceBefore: centsToMoney(balanceCents),
+                        balanceAfter: centsToMoney(newBalanceCents),
+                        walletVersion: wallet.version,
+                    }, tx);
 
                     await this.outboxService.enqueueTransaction(
                         {
@@ -381,7 +476,22 @@ export class TransactionsService {
 
                 },
             );
+            if (result.idempotentReplay) this.metrics.increment('wager_idempotent_duplicates_total');
+            else this.metrics.increment('wager_transactions_total', `{status="${result.status}"}`);
+            this.metrics.observe('wager_processing_duration_ms', performance.now() - startedAt);
+            this.logger.log(JSON.stringify({
+                event: 'wager_transaction_result', correlationId: result.id,
+                transactionId: result.id, walletId: result.walletId,
+                providerId: result.providerId, status: result.status,
+                idempotentReplay: result.idempotentReplay,
+            }));
+            return result;
         } catch (error) {
+            const databaseCode = typeof error === 'object' && error !== null && 'code' in error
+                ? String((error as { code: unknown }).code) : '';
+            if (databaseCode === '40P01' || databaseCode === '40001') {
+                this.metrics.increment('wager_lock_conflicts_total');
+            }
             // Trata colisões concorrentes de chaves ou identificadores únicos.
             if (!(error instanceof UniqueConstraintViolationException)) {
                 throw error;
@@ -398,6 +508,8 @@ export class TransactionsService {
                     );
                 }
 
+                existing.idempotentReplay = true;
+                this.metrics.increment('wager_idempotent_duplicates_total');
                 return existing;
             }
 
@@ -417,6 +529,19 @@ export class TransactionsService {
         return transaction ?? null;
     }
 
+    private enqueueRejected(
+        transaction: Transaction,
+        input: CreateTransactionDto,
+        tx: EntityManager,
+    ) {
+        return this.outboxService.enqueueTransaction({
+            transactionId: transaction.id, walletId: input.walletId,
+            playerId: input.playerId, type: input.type,
+            amount: input.amount, currency: input.currency,
+            status: 'REJECTED', failureCode: transaction.failureCode,
+        }, tx);
+    }
+
     async findById(id: string): Promise<Transaction> {
         const transaction = await this.em.findOne(Transaction, { id });
 
@@ -425,6 +550,33 @@ export class TransactionsService {
         }
 
         return transaction;
+    }
+
+    async findByProviderExternalId(providerId: string, externalTransactionId: string): Promise<Transaction> {
+        const transaction = await this.em.findOne(Transaction, { providerId, externalTransactionId });
+        if (!transaction) throw new NotFoundException('Transação não encontrada');
+        return transaction;
+    }
+
+    async retryPendingReferences(): Promise<void> {
+        const pending = await this.em.find(Transaction, {
+            status: 'PENDING_REFERENCE',
+            nextReferenceAttemptAt: { $lte: new Date() },
+        }, { limit: 20, orderBy: { nextReferenceAttemptAt: 'ASC' } });
+        for (const item of pending) {
+            await this.processTransaction({
+                providerId: item.providerId,
+                externalTransactionId: item.externalTransactionId,
+                walletId: item.walletId,
+                playerId: item.playerId,
+                roundId: item.roundId,
+                gameId: item.gameId,
+                type: item.type as CreateTransactionDto['type'],
+                amount: item.amount,
+                currency: item.currency,
+                externalReferenceTransactionId: item.referenceExternalTransactionId,
+            }, item.idempotencyKey);
+        }
     }
 
     async ensureIdempotencyKeyAvailable(

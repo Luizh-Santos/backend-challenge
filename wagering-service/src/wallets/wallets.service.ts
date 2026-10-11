@@ -63,37 +63,37 @@ export class WalletsService {
 
         await tx.persist(wallet).flush();
 
-        const openingId = `wallet-opening:${wallet.id}`;
-        const payloadHash = createHash('sha256')
-          .update(JSON.stringify([
-            wallet.id,
-            wallet.playerId,
-            wallet.currency,
-            initialBalance,
-          ]))
-          .digest('hex');
-
-        const opening = tx.create(Transaction, {
-          providerId: 'INTERNAL',
-          externalTransactionId: openingId,
-          idempotencyKey: openingId,
-          payloadHash,
-          walletId: wallet.id,
-          playerId: wallet.playerId,
-          roundId: 'INTERNAL',
-          gameId: 'INTERNAL',
-          type: 'OPENING',
-          amount: initialBalance,
-          currency,
-          status: 'PROCESSED',
-          processedAt: now,
-          createdAt: now,
-        });
-
-        await tx.persist(opening).flush();
-
-        // Não existe lançamento financeiro de valor zero.
         if (initialBalance !== '0.00') {
+          const openingId = `wallet-opening:${wallet.id}`;
+          const payloadHash = createHash('sha256')
+            .update(JSON.stringify([
+              wallet.id,
+              wallet.playerId,
+              wallet.currency,
+              initialBalance,
+            ]))
+            .digest('hex');
+
+          const opening = tx.create(Transaction, {
+            providerId: 'INTERNAL',
+            externalTransactionId: openingId,
+            idempotencyKey: openingId,
+            payloadHash,
+            walletId: wallet.id,
+            playerId: wallet.playerId,
+            roundId: 'INTERNAL',
+            gameId: 'INTERNAL',
+            type: 'OPENING',
+            amount: initialBalance,
+            currency,
+            status: 'PROCESSED',
+            retryAttempts: 0,
+            idempotentReplay: false,
+            processedAt: now,
+            createdAt: now,
+          });
+
+          await tx.persist(opening).flush();
           await this.ledgerService.createEntry(
             {
               transactionId: opening.id,

@@ -1,14 +1,8 @@
 
-import {
-  Entity,
-  PrimaryKey,
-  Property,
-  Unique,
-  Index,
-} from '@mikro-orm/decorators/legacy';
+import { Entity, PrimaryKey, Property, Unique, Index } from '@mikro-orm/decorators/legacy';
 
 @Entity({ tableName: 'inbox_events' })
-@Unique({ properties: ['eventId'] })
+@Unique({ name: 'inbox_consumer_message_unique', properties: ['consumerName', 'messageId'] })
 @Index({ properties: ['status', 'receivedAt'] })
 export class InboxEvent {
   @PrimaryKey({ type: 'uuid' })
@@ -16,6 +10,15 @@ export class InboxEvent {
 
   @Property({ type: 'string' })
   eventId!: string;
+
+  @Property({ type: 'string' })
+  consumerName = 'wager-transaction-consumer';
+
+  @Property({ type: 'string' })
+  messageId!: string;
+
+  @Property({ type: 'string' })
+  payloadHash!: string;
 
   @Property({ type: 'string' })
   eventType!: string;

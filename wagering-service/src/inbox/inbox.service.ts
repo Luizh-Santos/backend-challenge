@@ -4,8 +4,8 @@ import {
 } from '@nestjs/common';
 import {
   EntityManager,
-  UniqueConstraintViolationException,
 } from '@mikro-orm/postgresql';
+import { createHash } from 'node:crypto';
 
 import { InboxEvent } from './inbox-event.entity.js';
 
@@ -14,20 +14,27 @@ export class InboxService {
   constructor(private readonly em: EntityManager) {}
 
   async recordMessage(
-    payload: Record<string, unknown>,
+    messageIdOrPayload: string | Record<string, unknown>,
+    payloadArg?: Record<string, unknown>,
+    processArg?: (tx: EntityManager) => Promise<unknown>,
   ): Promise<boolean> {
-    const eventId = payload.transactionId;
-    const eventType = 'WAGER_TRANSACTION_PROCESSED';
+    const payload = typeof messageIdOrPayload === 'string' ? payloadArg! : messageIdOrPayload;
+    const messageId = typeof messageIdOrPayload === 'string'
+      ? messageIdOrPayload
+      : String(messageIdOrPayload.transactionId ?? 'legacy-message');
+    const process = processArg ?? (async () => undefined);
+    if (!messageId.trim()) throw new Error('Mensagem SQS sem MessageId válido');
+    const eventId = `wager-transaction-consumer:${messageId}`;
+    const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    const eventType = 'WagerTransactionRequested';
 
-    if (typeof eventId !== 'string' || !eventId.trim()) {
-      throw new Error('Mensagem SQS sem transactionId válido');
-    }
-
-    try {
-      return await this.em.transactional(async (tx) => {
-        const existing = await tx.findOne(InboxEvent, { eventId });
+    return this.em.transactional(async (tx) => {
+        const existing = await tx.findOne(InboxEvent, {
+          consumerName: 'wager-transaction-consumer', messageId,
+        });
 
         if (existing) {
+          if (existing.payloadHash !== payloadHash) throw new Error('MessageId reutilizado com payload diferente');
           return false;
         }
 
@@ -35,6 +42,9 @@ export class InboxService {
 
         const event = tx.create(InboxEvent, {
           eventId,
+          consumerName: 'wager-transaction-consumer',
+          messageId,
+          payloadHash,
           eventType,
           payload,
           status: 'PROCESSED',
@@ -43,17 +53,10 @@ export class InboxService {
         });
 
         await tx.persist(event).flush();
+        await process(tx);
+        await tx.flush();
 
         return true;
-      });
-    } catch (error) {
-      // Se outra instância registrou o evento primeiro, a restrição
-      // UNIQUE garante que ele não seja duplicado.
-      if (error instanceof UniqueConstraintViolationException) {
-        return false;
-      }
-
-      throw error;
-    }
+    });
   }
 }

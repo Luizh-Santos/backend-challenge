@@ -22,6 +22,10 @@ export class SqsService implements OnModuleDestroy {
   private readonly queueUrl =
     process.env.SQS_QUEUE_URL ??
     'http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo';
+  private readonly eventsQueueUrl = process.env.SQS_EVENTS_QUEUE_URL ??
+    'http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-integration-events.fifo';
+  private readonly dlqUrl = process.env.SQS_DLQ_URL ??
+    'http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo';
 
   async publishTransaction(
     message: Record<string, unknown>,
@@ -30,7 +34,7 @@ export class SqsService implements OnModuleDestroy {
   ): Promise<void> {
     await this.client.send(
       new SendMessageCommand({
-        QueueUrl: this.queueUrl,
+        QueueUrl: this.eventsQueueUrl,
         MessageBody: JSON.stringify(message),
         MessageGroupId: walletId,
         MessageDeduplicationId: transactionId,
@@ -58,6 +62,21 @@ export class SqsService implements OnModuleDestroy {
         ReceiptHandle: receiptHandle,
       }),
     );
+  }
+
+  async checkReady(): Promise<void> {
+    const { GetQueueAttributesCommand } = await import('@aws-sdk/client-sqs');
+    await this.client.send(new GetQueueAttributesCommand({
+      QueueUrl: this.queueUrl, AttributeNames: ['QueueArn'],
+    }));
+  }
+
+  async getDlqDepth(): Promise<number> {
+    const { GetQueueAttributesCommand } = await import('@aws-sdk/client-sqs');
+    const response = await this.client.send(new GetQueueAttributesCommand({
+      QueueUrl: this.dlqUrl, AttributeNames: ['ApproximateNumberOfMessages'],
+    }));
+    return Number(response.Attributes?.ApproximateNumberOfMessages ?? 0);
   }
 
   onModuleDestroy(): void {

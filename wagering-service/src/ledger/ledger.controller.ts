@@ -13,6 +13,7 @@ export class LedgerController {
     private readonly ledgerService: LedgerService,
   ) {}
 
+
   @Get()
   async findByWallet(
     @Param('walletId') walletId: string,

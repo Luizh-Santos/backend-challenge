@@ -4,9 +4,10 @@ import { MikroOrmModule } from '@mikro-orm/nestjs';
 
 import { Transaction } from './transaction.entity.js';
 import { TransactionsService } from './transaction.service.js';
-import { TransactionsController } from './transactions.controller.js';
+import { TransactionsController, ProviderTransactionsController } from './transactions.controller.js';
 import { LedgerModule } from '../ledger/ledger.module.js';
 import { OutboxModule } from '../outbox/outbox.module.js';
+import { ReferenceRetryWorker } from './reference-retry.worker.js';
 
 @Module({
   imports: [
@@ -14,8 +15,8 @@ import { OutboxModule } from '../outbox/outbox.module.js';
     LedgerModule,
     OutboxModule,
   ],
-  controllers: [TransactionsController],
-  providers: [TransactionsService],
+  controllers: [TransactionsController, ProviderTransactionsController],
+  providers: [TransactionsService, ReferenceRetryWorker],
   exports: [TransactionsService],
 })
 export class TransactionsModule {}

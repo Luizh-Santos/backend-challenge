@@ -6,11 +6,13 @@ import { InboxEvent } from './inbox-event.entity.js';
 import { InboxService } from './inbox.service.js';
 import { InboxConsumerService } from './inbox-consumer.service.js';
 import { SqsModule } from '../sqs/sqs.module.js';
+import { TransactionsModule } from '../transactions/transactions.module.js';
 
 @Module({
   imports: [
     MikroOrmModule.forFeature([InboxEvent]),
     SqsModule,
+    TransactionsModule,
   ],
   providers: [
     InboxService,

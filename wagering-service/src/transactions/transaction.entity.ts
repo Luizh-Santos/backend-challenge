@@ -44,6 +44,9 @@ export class Transaction {
   @Property({ type: 'decimal', precision: 18, scale: 2 })
   amount!: string;
 
+  @Property({ type: 'decimal', precision: 18, scale: 2, nullable: true })
+  responseBalance?: string;
+
   @Property({ type: 'string' })
   currency: string = 'BRL';
 
@@ -59,6 +62,14 @@ export class Transaction {
   @Property({ type: 'Date', nullable: true })
   processedAt?: Date;
 
+  @Property({ type: 'integer' })
+  retryAttempts = 0;
+
+  @Property({ type: 'Date', nullable: true })
+  nextReferenceAttemptAt?: Date;
+
   @Property({ type: 'Date' })
   createdAt: Date = new Date();
+
+  idempotentReplay = false;
 }

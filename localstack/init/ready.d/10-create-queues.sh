@@ -36,4 +36,8 @@ awslocal sqs create-queue \
   --queue-name "$QUEUE_NAME" \
   --attributes "$ATTRIBUTES"
 
+awslocal sqs create-queue \
+  --queue-name "wager-integration-events.fifo" \
+  --attributes '{"FifoQueue":"true","ContentBasedDeduplication":"true"}'
+
 echo "Filas configuradas com sucesso."

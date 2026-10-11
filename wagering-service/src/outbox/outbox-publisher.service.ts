@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { SqsService } from '../sqs/sqs.service.js';
+import { MetricsService } from '../observability/metrics.service.js';
 
 interface ClaimedOutboxRow {
   id: string;
@@ -22,18 +23,21 @@ export class OutboxPublisherService
 {
   private readonly logger = new Logger(OutboxPublisherService.name);
   private stopping = false;
+  private running?: Promise<void>;
 
   constructor(
     private readonly em: EntityManager,
     private readonly sqsService: SqsService,
+    private readonly metrics: MetricsService,
   ) {}
 
   onModuleInit(): void {
-    void this.poll();
+    this.running = this.poll();
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.stopping = true;
+    await this.running;
   }
 
   private async poll(): Promise<void> {
@@ -92,6 +96,10 @@ export class OutboxPublisherService
           e.attempts
       `);
     });
+    const lag = await db.getConnection().execute<Array<{ lag: number }>>(
+      `select coalesce(extract(epoch from (now() - min(created_at))) * 1000, 0)::int as lag from outbox_events where status = 'PENDING'`,
+    );
+    this.metrics.setGauge('wager_outbox_lag_ms', Number(lag[0]?.lag ?? 0));
 
     for (const row of rows) {
       try {
@@ -111,8 +119,12 @@ export class OutboxPublisherService
           [row.id],
         );
 
-        this.logger.log(`Evento ${row.id} publicado no SQS`);
+        this.logger.log(JSON.stringify({
+          event: 'outbox_event_published', eventId: row.id,
+          eventType: row.event_type, aggregateId: row.aggregate_id,
+        }));
       } catch (error) {
+        this.metrics.increment('wager_outbox_retries_total');
         const message = (
           error instanceof Error ? error.message : String(error)
         ).slice(0, 255);

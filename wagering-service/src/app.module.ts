@@ -10,6 +10,7 @@ import { HealthModule } from './health/health.module.js';
 import { SqsModule } from './sqs/sqs.module.js';
 import { OutboxModule } from './outbox/outbox.module.js';
 import { InboxModule } from './inbox/inbox.module.js';
+import { MetricsModule } from './observability/metrics.service.js';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { InboxModule } from './inbox/inbox.module.js';
     SqsModule,
     OutboxModule,
     InboxModule,
+    MetricsModule,
   ],
 })
 export class AppModule {}
