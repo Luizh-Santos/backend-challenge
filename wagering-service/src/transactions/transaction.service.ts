@@ -497,7 +497,7 @@ export class TransactionsService {
                 throw error;
             }
 
-            const existing = await this.em.findOne(Transaction, {
+            const existing = await manager.findOne(Transaction, {
                 idempotencyKey,
             });
 
@@ -559,7 +559,9 @@ export class TransactionsService {
     }
 
     async retryPendingReferences(): Promise<void> {
-        const pending = await this.em.find(Transaction, {
+        // Workers não têm RequestContext HTTP; cada ciclo usa um identity map isolado.
+        const workerEm = this.em.fork();
+        const pending = await workerEm.find(Transaction, {
             status: 'PENDING_REFERENCE',
             nextReferenceAttemptAt: { $lte: new Date() },
         }, { limit: 20, orderBy: { nextReferenceAttemptAt: 'ASC' } });
@@ -575,7 +577,7 @@ export class TransactionsService {
                 amount: item.amount,
                 currency: item.currency,
                 externalReferenceTransactionId: item.referenceExternalTransactionId,
-            }, item.idempotencyKey);
+            }, item.idempotencyKey, workerEm);
         }
     }
 

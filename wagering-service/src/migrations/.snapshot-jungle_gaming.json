@@ -8,6 +8,23 @@
       "name": "inbox_events",
       "schema": "public",
       "columns": {
+        "consumer_name": {
+          "name": "consumer_name",
+          "type": "varchar(128)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": true,
+          "length": 128,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "string"
+        },
         "event_id": {
           "name": "event_id",
           "type": "varchar(255)",
@@ -15,7 +32,7 @@
           "autoincrement": false,
           "primary": false,
           "nullable": false,
-          "unique": true,
+          "unique": false,
           "length": 255,
           "precision": null,
           "scale": null,
@@ -59,6 +76,23 @@
           "enumItems": [],
           "mappedType": "uuid"
         },
+        "message_id": {
+          "name": "message_id",
+          "type": "varchar(255)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 255,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "string"
+        },
         "payload": {
           "name": "payload",
           "type": "jsonb",
@@ -75,6 +109,23 @@
           "collation": null,
           "enumItems": [],
           "mappedType": "json"
+        },
+        "payload_hash": {
+          "name": "payload_hash",
+          "type": "varchar(64)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": 64,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "string"
         },
         "processed_at": {
           "name": "processed_at",
@@ -131,11 +182,12 @@
       "indexes": [
         {
           "columnNames": [
-            "event_id"
+            "consumer_name",
+            "message_id"
           ],
-          "composite": false,
+          "composite": true,
           "constraint": true,
-          "keyName": "inbox_events_event_id_unique",
+          "keyName": "inbox_consumer_message_unique",
           "primary": false,
           "unique": true
         },
@@ -263,14 +315,17 @@
           "primary": false,
           "nullable": false,
           "unique": false,
-          "length": 255,
+          "length": null,
           "precision": null,
           "scale": null,
           "default": null,
           "comment": null,
           "collation": null,
-          "enumItems": [],
-          "mappedType": "string"
+          "enumItems": [
+            "CREDIT",
+            "DEBIT"
+          ],
+          "mappedType": "enum"
         },
         "wallet_id": {
           "name": "wallet_id",
@@ -317,11 +372,54 @@
         {
           "name": "ledger_entries_amount_positive",
           "expression": "amount > 0",
-          "definition": "check (amount > 0)"
+          "definition": "CHECK ((amount > (0)::numeric))",
+          "columnName": "amount"
+        },
+        {
+          "name": "ledger_entries_direction_valid",
+          "expression": "\"type\" in ('CREDIT', 'DEBIT')",
+          "definition": "check (\"type\" in ('CREDIT', 'DEBIT'))",
+          "columnName": "type"
         }
       ],
-      "triggers": [],
-      "foreignKeys": {},
+      "triggers": [
+        {
+          "name": "ledger_entries_immutable",
+          "timing": "before",
+          "events": [
+            "delete",
+            "update"
+          ],
+          "forEach": "row",
+          "body": ""
+        }
+      ],
+      "foreignKeys": {
+        "ledger_entries_transaction_fk": {
+          "columnNames": [
+            "transaction_id"
+          ],
+          "constraintName": "ledger_entries_transaction_fk",
+          "localTableName": "public.ledger_entries",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.transactions",
+          "deleteRule": "restrict"
+        },
+        "ledger_entries_wallet_fk": {
+          "columnNames": [
+            "wallet_id"
+          ],
+          "constraintName": "ledger_entries_wallet_fk",
+          "localTableName": "public.ledger_entries",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.wallets",
+          "deleteRule": "restrict"
+        }
+      },
       "comment": null
     },
     {
@@ -522,7 +620,14 @@
           "unique": false
         }
       ],
-      "checks": [],
+      "checks": [
+        {
+          "name": "outbox_attempts_non_negative",
+          "expression": "attempts >= 0",
+          "definition": "CHECK ((attempts >= 0))",
+          "columnName": "attempts"
+        }
+      ],
       "triggers": [],
       "foreignKeys": {},
       "comment": null
@@ -667,6 +772,23 @@
           "enumItems": [],
           "mappedType": "string"
         },
+        "next_reference_attempt_at": {
+          "name": "next_reference_attempt_at",
+          "type": "timestamptz(6)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": 6,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "datetime"
+        },
         "payload_hash": {
           "name": "payload_hash",
           "type": "varchar(255)",
@@ -752,6 +874,40 @@
           "enumItems": [],
           "mappedType": "string"
         },
+        "response_balance": {
+          "name": "response_balance",
+          "type": "numeric(18,2)",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": true,
+          "unique": false,
+          "length": null,
+          "precision": 18,
+          "scale": 2,
+          "default": null,
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "decimal"
+        },
+        "retry_attempts": {
+          "name": "retry_attempts",
+          "type": "int",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": "0",
+          "comment": null,
+          "collation": null,
+          "enumItems": [],
+          "mappedType": "integer"
+        },
         "round_id": {
           "name": "round_id",
           "type": "varchar(255)",
@@ -777,14 +933,20 @@
           "primary": false,
           "nullable": false,
           "unique": false,
-          "length": 255,
+          "length": null,
           "precision": null,
           "scale": null,
           "default": "'PENDING'",
           "comment": null,
           "collation": null,
-          "enumItems": [],
-          "mappedType": "string"
+          "enumItems": [
+            "PENDING",
+            "PENDING_REFERENCE",
+            "PROCESSED",
+            "REJECTED",
+            "FAILED"
+          ],
+          "mappedType": "enum"
         },
         "type": {
           "name": "type",
@@ -794,14 +956,21 @@
           "primary": false,
           "nullable": false,
           "unique": false,
-          "length": 255,
+          "length": null,
           "precision": null,
           "scale": null,
           "default": null,
           "comment": null,
           "collation": null,
-          "enumItems": [],
-          "mappedType": "string"
+          "enumItems": [
+            "OPENING",
+            "BET",
+            "WIN",
+            "LOSS",
+            "REFUND",
+            "ROLLBACK"
+          ],
+          "mappedType": "enum"
         },
         "wallet_id": {
           "name": "wallet_id",
@@ -831,6 +1000,17 @@
           "keyName": "transactions_idempotency_key_unique",
           "primary": false,
           "unique": true
+        },
+        {
+          "columnNames": [
+            "next_reference_attempt_at"
+          ],
+          "composite": false,
+          "constraint": false,
+          "keyName": "transactions_pending_reference_due_idx",
+          "primary": false,
+          "unique": false,
+          "where": "(status)::text = 'PENDING_REFERENCE'::text"
         },
         {
           "columnNames": [
@@ -865,9 +1045,41 @@
           "unique": false
         }
       ],
-      "checks": [],
+      "checks": [
+        {
+          "name": "transactions_amount_positive",
+          "expression": "amount > 0",
+          "definition": "CHECK ((amount > (0)::numeric))",
+          "columnName": "amount"
+        },
+        {
+          "name": "transactions_kind_valid",
+          "expression": "\"type\" in ('OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK')",
+          "definition": "check (\"type\" in ('OPENING', 'BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'))",
+          "columnName": "type"
+        },
+        {
+          "name": "transactions_status_valid",
+          "expression": "\"status\" in ('PENDING', 'PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED')",
+          "definition": "check (\"status\" in ('PENDING', 'PENDING_REFERENCE', 'PROCESSED', 'REJECTED', 'FAILED'))",
+          "columnName": "status"
+        }
+      ],
       "triggers": [],
-      "foreignKeys": {},
+      "foreignKeys": {
+        "transactions_wallet_fk": {
+          "columnNames": [
+            "wallet_id"
+          ],
+          "constraintName": "transactions_wallet_fk",
+          "localTableName": "public.transactions",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "referencedTableName": "public.wallets",
+          "deleteRule": "restrict"
+        }
+      },
       "comment": null
     },
     {
@@ -1021,7 +1233,14 @@
         {
           "name": "wallets_balance_non_negative",
           "expression": "balance >= 0",
-          "definition": "check (balance >= 0)"
+          "definition": "CHECK ((balance >= (0)::numeric))",
+          "columnName": "balance"
+        },
+        {
+          "name": "wallets_currency_format",
+          "expression": "currency ~ '^[A-Z]{3}$'::text",
+          "definition": "CHECK (((currency)::text ~ '^[A-Z]{3}$'::text))",
+          "columnName": "currency"
         }
       ],
       "triggers": [],
